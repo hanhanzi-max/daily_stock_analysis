@@ -54,7 +54,7 @@ jobs:
 
       - name: Run stock analysis
         env:
-          STOCK_LIST: ${{ vars.STOCK_LIST || secrets.STOCK_LIST || '600519' }}
+          STOCK_LIST: ${{ vars.STOCK_LIST || secrets.STOCK_LIST || '' }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL || secrets.GEMINI_MODEL || 'gemini-2.5-flash' }}
@@ -82,7 +82,8 @@ jobs:
           EMAIL_RECEIVERS: ${{ vars.EMAIL_RECEIVERS || secrets.EMAIL_RECEIVERS }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
-          REPORT_TYPE: ${{ vars.REPORT_TYPE || secrets.REPORT_TYPE || 'simple' }}
+          REPORT_TYPE: ${{ vars.REPORT_TYPE || secrets.REPORT_TYPE || 'full' }}
+          REPORT_SUMMARY_ONLY: ${{ vars.REPORT_SUMMARY_ONLY || secrets.REPORT_SUMMARY_ONLY || 'false' }}
           REPORT_LANGUAGE: ${{ vars.REPORT_LANGUAGE || secrets.REPORT_LANGUAGE || 'zh' }}
           MARKET_REVIEW_ENABLED: ${{ vars.MARKET_REVIEW_ENABLED || secrets.MARKET_REVIEW_ENABLED || 'true' }}
           TRADING_DAY_CHECK_ENABLED: ${{ vars.TRADING_DAY_CHECK_ENABLED || secrets.TRADING_DAY_CHECK_ENABLED || 'true' }}
@@ -95,16 +96,86 @@ jobs:
             FORCE_RUN_ARG="--force-run"
           fi
 
+          if [ -z "$STOCK_LIST" ]; then
+            echo "STOCK_LIST is empty. Add STOCK_LIST in Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
           echo "Run mode: $MODE"
           echo "Stocks: $STOCK_LIST"
+          echo "Report type: $REPORT_TYPE"
+          echo "Gemini configured: $([ -n "$GEMINI_API_KEY$GEMINI_API_KEYS" ] && echo yes || echo no)"
+          echo "DeepSeek configured: $([ -n "$DEEPSEEK_API_KEY$DEEPSEEK_API_KEYS" ] && echo yes || echo no)"
+          echo "OpenAI configured: $([ -n "$OPENAI_API_KEY$OPENAI_API_KEYS$AIHUBMIX_KEY" ] && echo yes || echo no)"
+          echo "Anspire configured: $([ -n "$ANSPIRE_API_KEYS" ] && echo yes || echo no)"
 
           if [ "$MODE" = "market-only" ]; then
             python main.py --market-review $FORCE_RUN_ARG
           elif [ "$MODE" = "stocks-only" ]; then
-            python main.py --no-market-review $FORCE_RUN_ARG
+            python main.py --stocks "$STOCK_LIST" --no-market-review $FORCE_RUN_ARG
           else
-            python main.py $FORCE_RUN_ARG
+            python main.py --stocks "$STOCK_LIST" $FORCE_RUN_ARG
           fi
+
+      - name: Render Markdown reports as HTML
+        if: always()
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import html
+
+          reports_dir = Path("reports")
+          reports_dir.mkdir(exist_ok=True)
+          md_files = sorted(reports_dir.glob("*.md"))
+          if not md_files:
+              print("No markdown reports found to render.")
+              raise SystemExit(0)
+
+          try:
+              import markdown2
+          except Exception:
+              markdown2 = None
+
+          css = """
+          body { max-width: 960px; margin: 32px auto; padding: 0 20px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.65; color: #172033; }
+          table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+          th, td { border: 1px solid #d8dee9; padding: 8px 10px; text-align: left; }
+          th { background: #f4f6f8; }
+          pre, code { background: #f6f8fa; border-radius: 4px; }
+          pre { padding: 12px; overflow: auto; }
+          blockquote { border-left: 4px solid #4f8cff; margin: 16px 0; padding: 8px 14px; background: #f7fbff; }
+          """
+
+          links = []
+          for md_path in md_files:
+              text = md_path.read_text(encoding="utf-8")
+              if markdown2 is not None:
+                  body = markdown2.markdown(text, extras=["tables", "fenced-code-blocks", "strike", "task_list"])
+              else:
+                  body = "<pre>" + html.escape(text) + "</pre>"
+              html_path = md_path.with_suffix(".html")
+              html_path.write_text(
+                  "<!doctype html><html><head><meta charset='utf-8'>"
+                  "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+                  f"<title>{html.escape(md_path.stem)}</title><style>{css}</style>"
+                  "</head><body>" + body + "</body></html>",
+                  encoding="utf-8",
+              )
+              links.append((md_path.name, html_path.name))
+              print(f"Rendered {md_path} -> {html_path}")
+
+          index_items = "\n".join(
+              f"<li><a href='{html.escape(html_name)}'>{html.escape(md_name)}</a></li>"
+              for md_name, html_name in links
+          )
+          (reports_dir / "index.html").write_text(
+              "<!doctype html><html><head><meta charset='utf-8'>"
+              "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+              f"<title>Analysis reports</title><style>{css}</style></head>"
+              f"<body><h1>Analysis reports</h1><ul>{index_items}</ul></body></html>",
+              encoding="utf-8",
+          )
+          PY
 
       - name: Upload reports and logs
         uses: actions/upload-artifact@v6
